@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>InternalBeyond 原生格式导出</title>
+<style>
+  body{font-family:-apple-system,'PingFang SC',sans-serif;background:#eef2f8;color:#132a52;margin:0;padding:20px;min-height:100vh;display:flex;align-items:center;justify-content:center;}
+  .card{background:#fff;border-radius:16px;padding:24px;max-width:560px;width:100%;box-shadow:0 4px 20px rgba(19,42,82,.08);}
+  h2{margin:0 0 6px;font-size:1.1rem;}
+  p{margin:6px 0;font-size:.88rem;color:#3b5686;line-height:1.7;}
+  .hint{font-size:.78rem;color:#7b8794;background:#f4f7fb;border-radius:8px;padding:10px;margin:12px 0;}
+  button{margin-top:14px;width:100%;height:46px;border:none;border-radius:12px;background:#2f6fae;color:#fff;font-size:.95rem;font-weight:600;cursor:pointer;}
+  button:disabled{background:#9db4cf;}
+  #log{font-size:.8rem;color:#3f74ad;margin-top:12px;white-space:pre-wrap;word-break:break-all;}
+  #done{font-size:.9rem;font-weight:600;color:#1f7a3d;margin-top:8px;}
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>InternalBeyond · 原生格式导出</h2>
+  <p>直接读 IndexedDB，重排成源码 Data 页能导入的扁平格式（<code>version:4 / origin:mobile</code>），流式分块写出，大历史数据也不会崩。</p>
+  <p class="hint">⚠ 必须和 app 在<b>同一个域名/源</b>打开（部署到你 GitHub Pages 站点根目录后，用 <code>你的域名/ib_export_fixed.html</code> 访问），才能读到同一份 IndexedDB。</p>
+  <button id="go" type="button">开始导出备份</button>
+  <div id="log"></div>
+  <div id="done"></div>
+</div>
+<script>
+// 源码常量：InternalBeyondDB v16，逻辑 store = SYNC_STORES
+var DB_NAME='InternalBeyondDB';
+var SYNC_STORES=['about','apiConfigs','chatMessages','chatThreads','chatSummaries','groups','uploadedFiles','memories','autoMemory','apiSettings','calEvents','calNotes','calLedger','posts','categories','letters','blogComments','blogAnnotations','projects','projectFiles','feed'];
+var APP_VERSION='v405-p'; // 源码 IB_VER
+
+var logEl=document.getElementById('log'),doneEl=document.getElementById('done'),btn=document.getElementById('go');
+function log(t){logEl.textContent+=t+'\n'}
+function flush(chunks,parts){if(parts.length){chunks.push(new Blob(parts));parts=[];return 1}return 0}
+
+btn.addEventListener('click',async function(){
+  btn.disabled=true;logEl.textContent='';doneEl.textContent='';log('正在打开数据库…');
+  try{
+    var db=await new Promise(function(res,rej){
+      var q=indexedDB.open(DB_NAME);
+      q.onsuccess=function(){res(q.result)};
+      q.onerror=function(){rej(q.error||new Error('InternalBeyondDB 打不开'))};
+    });
+
+    var chunks=[],parts=['{'],psz=1;
+    var flushNow=function(){psz-=flush(chunks,parts)};
+
+    for(var i=0;i<SYNC_STORES.length;i++){
+      var s=SYNC_STORES[i];
+      // 该表是否存在（某些表可能从没建过）
+      if(!db.objectStoreNames.contains(s)){parts.push(JSON.stringify(s)+':[],');log('['+(i+1)+'/'+SYNC_STORES.length+'] '+s+' 无表 → 空');continue}
+      parts.push(JSON.stringify(s)+':[');
+      var n=0;
+      await new Promise(function(res,rej){
+        var tx=db.transaction(s,'readonly');
+        var store=tx.objectStore(s);
+        var req=store.openCursor();
+        req.onsuccess=function(ev){
+          var cur=ev.target.result;
+          if(cur){
+            var v=cur.value;
+            var j1=JSON.stringify(v);
+            parts.push((n?',':'')+j1);n++;psz+=j1.length;
+            if(psz>2097152)flushNow(); // 每 2MB 落一块
+            cur.continue();
+          }else res();
+        };
+        req.onerror=function(){rej(req.error||new Error(s+' 读取失败'))};
+      });
+      parts.push('],');
+      log('['+(i+1)+'/'+SYNC_STORES.length+'] '+s+'：'+n+' 条 ✓');
+    }
+
+    // 结尾版本头（与源码 _mioRunExport 一致）
+    parts.push('"exportDate":'+JSON.stringify(new Date().toISOString())+',"version":4,"origin":"mobile","appVersion":'+JSON.stringify(APP_VERSION)+',"noKey":false}');
+    flushNow();
+
+    var blob=new Blob(chunks,{type:'application/json'});chunks=null;
+    var fname='InternalBeyond_backup_'+new Date().toISOString().slice(0,10)+'_mobile.json';
+    var a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download=fname;
+    document.body.appendChild(a);a.click();
+    setTimeout(function(){URL.revokeObjectURL(a.href)},1500);
+    doneEl.textContent='✓ 导出完成：'+(blob.size/1024/1024).toFixed(2)+' MB → '+fname;
+    log('完成。请到浏览器「下载」里保存这份 JSON。');
+    db.close();
+  }catch(err){
+    log('✕ 失败：'+String(err&&err.message||err).slice(0,200));
+  }finally{
+    btn.disabled=false;
+  }
+});
+</script>
+</body>
+</html>
